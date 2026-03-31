@@ -33,13 +33,11 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
     ]
 
 
-# SAS键扫描码
-SCAN_CTRLL = 29
-SCAN_CTRLR = 29 + 256  # 285
-SCAN_ALTL = 56
-SCAN_ALTR = 56 + 256  # 312
-SCAN_DEL = 83
-
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5  # O(1)人知道为啥ALT键的vk名称叫MENU
+VK_DELETE = 0x2E
 
 # WinAPI函数绑定
 user32 = ctypes.windll.user32
@@ -75,13 +73,11 @@ PostThreadMessage = user32.PostThreadMessageW
 PostThreadMessage.restype = wintypes.BOOL
 PostThreadMessage.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 
-
 _hook_id = None
 _callback_func = None
 _thread = None
 _press_callback: None | Callable[[int], Any] = None
 _release_callback: None | Callable[[int], Any] = None
-
 _state_lock = threading.Lock()
 _key_states = defaultdict(bool)
 
@@ -89,60 +85,57 @@ _key_states = defaultdict(bool)
 def _llkh(nCode: int, wParam, lParam):
     if nCode >= 0:
         kbd_struct = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT))
-        scan_code: int = kbd_struct.contents.scanCode
-
+        vk: int = kbd_struct.contents.vkCode
         key_down: bool = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
         key_up: bool = wParam in (WM_KEYUP, WM_SYSKEYUP)
-
         sas_detected = False
         pending_release_for_sas = []
         mock_keydown_needed = False
 
         with _state_lock:
-            if key_down and scan_code == SCAN_DEL:  # 判SAS
-                if (_key_states.get(SCAN_CTRLL, False) or _key_states.get(SCAN_CTRLR, False)) and (
-                    _key_states.get(SCAN_ALTL, False) or _key_states.get(SCAN_ALTR, False)
-                ):
+            if key_down and vk == VK_DELETE:
+                ctrl_pressed = _key_states.get(VK_LCONTROL, False) or _key_states.get(VK_RCONTROL, False)
+                alt_pressed = _key_states.get(VK_LMENU, False) or _key_states.get(VK_RMENU, False)
+
+                if ctrl_pressed and alt_pressed:
                     sas_detected = True
-                    for code in [SCAN_CTRLL, SCAN_CTRLR, SCAN_ALTL, SCAN_ALTR]:
+                    for code in [VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU]:
                         if _key_states.get(code, False):
                             pending_release_for_sas.append(code)
-                    pending_release_for_sas.append(SCAN_DEL)
-                    _key_states[SCAN_CTRLL] = False
-                    _key_states[SCAN_CTRLR] = False
-                    _key_states[SCAN_ALTL] = False
-                    _key_states[SCAN_ALTR] = False
-                    _key_states[SCAN_DEL] = False
+                            _key_states[code] = False
+
+                    pending_release_for_sas.append(VK_DELETE)
+                    _key_states[VK_DELETE] = False
 
             if not sas_detected:
                 if key_down:
-                    _key_states[scan_code] = True
+                    _key_states[vk] = True
                 elif key_up:
-                    if not _key_states.get(scan_code, False):
+                    if not _key_states.get(vk, False):
                         mock_keydown_needed = True
 
-        if sas_detected and _release_callback:
-            for code in pending_release_for_sas:
-                with suppress(Exception):
-                    _release_callback(code)
-        elif key_down and _press_callback:
-            with suppress(Exception):
-                _press_callback(scan_code)
-        elif key_up:
-            if mock_keydown_needed:
-                if _press_callback:
+            if sas_detected and _release_callback:
+                for code in pending_release_for_sas:
                     with suppress(Exception):
-                        with _state_lock:
-                            _key_states[scan_code] = True
-                        _press_callback(scan_code)
-                if _release_callback:
-                    with suppress(Exception):
-                        with _state_lock:
-                            _key_states[scan_code] = False
-                        _release_callback(scan_code)
-            elif _release_callback:
+                        _release_callback(code)
+            elif key_down and _press_callback:
                 with suppress(Exception):
-                    _release_callback(scan_code)
+                    _press_callback(vk)
+            elif key_up:
+                if mock_keydown_needed:
+                    if _press_callback:
+                        with suppress(Exception):
+                            with _state_lock:
+                                _key_states[vk] = True
+                            _press_callback(vk)
+                    if _release_callback:
+                        with suppress(Exception):
+                            with _state_lock:
+                                _key_states[vk] = False
+                            _release_callback(vk)
+                elif _release_callback:
+                    with suppress(Exception):
+                        _release_callback(vk)
 
     return CallNextHookEx(None, nCode, wParam, lParam)
 
@@ -179,12 +172,12 @@ def _msgloop():
             _key_states.clear()
 
 
-def set_press_callback(func: Callable[[int], Any]):
+def set_press_callback(func: Callable[[int], Any] | None):
     global _press_callback
     _press_callback = func
 
 
-def set_release_callback(func: Callable[[int], Any]):
+def set_release_callback(func: Callable[[int], Any] | None):
     global _release_callback
     _release_callback = func
 
