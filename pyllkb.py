@@ -149,6 +149,7 @@ def _llkh(nCode: int, wParam: int, lParam: int) -> int:
                 if not _key_states.get(vk, False):
                     pending.append((_EVENT_PRESS, vk))
                 pending.append((_EVENT_RELEASE, vk))
+            _key_states[vk] = False
 
     qput(pending)
     return CallNextHookEx(None, nCode, wParam, lParam)
